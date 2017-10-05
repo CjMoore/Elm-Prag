@@ -2,26 +2,35 @@ module Bingo exposing (..)
 
 import Html exposing (..)
 import Html.Attributes exposing (..)
-import Html.Events exposing (onClick)
+import Html.Events exposing (onClick, onInput)
 import Random
 import Http
 import Json.Decode as Decode exposing (Decoder, field, succeed)
 import Json.Decode.Pipeline as DecodePipeline exposing (decode, required, optional, hardcoded)
 import Json.Encode as Encode
+import ViewHelpers exposing (..)
+import Entry
 
 
 -- Model
-type alias Entry =
-        { id : Int
-        , phrase : String
-        , points : Int
-        , marked : Bool }
+
+type GameState = EnteringName | Playing
+
+
+--type alias Entry =
+--        { id : Int
+--        , phrase : String
+--        , points : Int
+--        , marked : Bool }
 
 type alias Model = 
          { name : String
          , gameNumber: Int
-         , entries : List Entry  
-         , alertMessage : Maybe String }
+         , entries : List Entry.Entry  
+         , alertMessage : Maybe String 
+         , nameInput : String
+         , gameState : GameState}
+
 
 type alias Score = 
         { id : Int
@@ -33,7 +42,9 @@ initialModel =
         { name = "Mike",
           gameNumber = 1,
           entries = [], 
-          alertMessage = Nothing 
+          alertMessage = Nothing,
+          nameInput = "",
+          gameState = EnteringName 
         }
 
 
@@ -44,15 +55,29 @@ type Msg
         = NewGame 
         | Mark Int 
         | NewRandom Int 
-        | NewEntries (Result Http.Error (List Entry))
+        | NewEntries (Result Http.Error (List Entry.Entry))
         | CloseAlert
         | ShareScore
         | NewScore (Result Http.Error Score)
+        | SetNameInput String
+        | SaveNameInput
+        | CancelName
+        | ChangeGameState GameState
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model = 
         case msg of 
+                ChangeGameState state ->
+                        ( { model | gameState = state }, Cmd.none )
+                CancelName ->
+                        ( { model | nameInput = "", gameState = Playing }, Cmd.none )
+                SaveNameInput ->
+                        ({ model | name = model.nameInput,
+                                   nameInput = "",
+                                   gameState = Playing }, Cmd.none)
+                SetNameInput value ->
+                        ( { model | nameInput = value }, Cmd.none )
                 NewGame ->
                         ({ model | gameNumber = model.gameNumber+1}, getEntries)
                 CloseAlert ->
@@ -69,54 +94,41 @@ update msg model =
                         in
                             ( { model | alertMessage = Just message }, Cmd.none )
                 NewScore ( Err error ) ->
-                        let
-                            message = 
-                                    "Error posting your score"
-                                    ++ (toString error)
-                        in
-                            ( { model | alertMessage = Just message }, Cmd.none )
+                    ( { model | alertMessage = Just (httpErrorToMessage error)}, Cmd.none )
                 Mark id ->
-                        let
-                            markEntry e = 
-                                    if e.id == id then
-                                            { e | marked = (not e.marked) }
-                                    else
-                                            e
-                         in 
-                             ( { model | entries = List.map markEntry model.entries }, Cmd.none )
+                     ( { model | entries = Entry.markEntryWithId model.entries id }, Cmd.none )
                 NewRandom randomNumber ->
                         ( { model | gameNumber = randomNumber }, Cmd.none )
                 NewEntries ( Ok randomEntries) ->
                             ( { model | entries = randomEntries
                                                   |> List.sortBy .points }, Cmd.none)
                 NewEntries ( Err error) ->
-                        let
-                            errorMessage = 
-                                    case error of 
-                                            Http.NetworkError ->
-                                                    "Is the server running?"
-                                            Http.BadStatus response ->
-                                                    (toString response.status)
-                                            Http.BadPayload message _ ->
-                                                    "Decoding Failed: " ++ message
-                                            _ ->
-                                                    (toString error)
-                                            
-                        in                        
-                            ({ model | alertMessage  = Just errorMessage }, Cmd.none)
+                    ({ model | alertMessage  = Just (httpErrorToMessage error)}, Cmd.none)
                             
+
+httpErrorToMessage : Http.Error -> String
+httpErrorToMessage error = 
+    case error of 
+            Http.NetworkError ->
+                    "Is the server running?"
+            Http.BadStatus response ->
+                    (toString response.status)
+            Http.BadPayload message _ ->
+                    "Decoding Failed: " ++ message
+            _ ->
+                    (toString error)
 
 
 -- Decoders/Encoders
 
 
-entryDecoder : Decoder Entry
-entryDecoder = 
-        decode Entry
-                |> DecodePipeline.required "id" Decode.int
-                |> DecodePipeline.required "phrase" Decode.string
-                |> DecodePipeline.optional "points" Decode.int 100
-                |> DecodePipeline.hardcoded False
+--entryDecoder : Decoder Entry.Entry
+--entryDecoder = 
+--        decode Entry.Entry
+--                |> DecodePipeline.required "id" Decode.int
+--                |> DecodePipeline.required "phrase" Decode.string
+--                |> DecodePipeline.optional "points" Decode.int 100
+--                |> DecodePipeline.hardcoded False
 
 
 encodedScore : Model -> Encode.Value
@@ -135,11 +147,15 @@ scoreDecoder =
 -- Commands
 
 
+apiUrlPrefix : String
+apiUrlPrefix = 
+        "http://localhost:3000"
+
 postScore : Model -> Cmd Msg
 postScore model = 
         let
            url = 
-               " http://localhost:3000/scores"
+               apiUrlPrefix ++ "/scores"
            body = 
                    encodedScore model
                    |> Http.jsonBody
@@ -154,41 +170,36 @@ generateRandomNumber =
 
 entriesUrl : String
 entriesUrl = 
-        "http://localhost:3000/random-entries"
+        apiUrlPrefix ++ "/random-entries"
 
 getEntries : Cmd Msg
 getEntries = 
-       ( Decode.list entryDecoder )
-        |> Http.get entriesUrl
-        |> Http.send NewEntries
+      Entry.getEntries NewEntries entriesUrl 
+
+hasZeroScore : Model -> Bool
+hasZeroScore model = 
+        ( sumMarkedPoints model.entries == 0 )
 
 
 -- View
 
-viewAlertMessage : Maybe String -> Html Msg
-viewAlertMessage alertMessage = 
-        case alertMessage of 
-                Just message -> 
-                        div [ class "alert" ]
-                            [ span [ class "close", onClick CloseAlert ] [ text "X" ],
-                              text message ]
-                Nothing ->
-                        text ""
-
-playerInfo : String -> Int -> String
-playerInfo name gameNumber = 
-        name ++ " - Game #" ++ (toString gameNumber)
+--viewAlertMessage : Maybe String -> Html Msg
+--viewAlertMessage alertMessage = 
+--        case alertMessage of 
+--                Just message -> 
+--                        div [ class "alert" ]
+--                            [ span [ class "close", onClick CloseAlert ] [ text "X" ],
+--                              text message ]
+--                Nothing ->
+--                        text ""
 
 viewPlayer : String -> Int -> Html Msg
 viewPlayer name gameNumber = 
-        let
-         playerInfoText = 
-                playerInfo name gameNumber
-                        |> String.toUpper
-                        |> text               
-        in
-                h2 [ id "info" , class "classy" ] 
-                   [ playerInfoText ]
+        h2 [ id "info" , class "classy" ] 
+           [ a [ href "#", onClick (ChangeGameState EnteringName) ]
+            [ text name ]
+           , text (" - Game #" ++ (toString gameNumber))
+           ]
 
 viewHeader : String -> Html Msg
 viewHeader title = 
@@ -202,18 +213,18 @@ viewFooter =
                     [ text "Powered By Elm" ] 
                 ]
 
-viewEntryList : List Entry -> Html Msg
-viewEntryList entries = 
-        let
-            listOfEntries =
-                   entries
-                   |> List.map  viewEntryItem
-                   --List.map viewEntryItem entries 
-        in
-            ul [] listOfEntries 
+--viewEntryList : List Entry.Entry -> Html Msg
+--viewEntryList entries = 
+--        let
+--            listOfEntries =
+--                   entries
+--                   |> List.map  viewEntryItem
+--                   --List.map viewEntryItem entries 
+--        in
+--            ul [] listOfEntries 
 
 
-sumMarkedPoints : List Entry -> Int
+sumMarkedPoints : List Entry.Entry -> Int
 sumMarkedPoints entries = 
         entries
         |> List.filter .marked
@@ -229,11 +240,11 @@ viewScore sum =
            ,  span [ class "value" ] [ text (toString sum) ]
            ]
            
-viewEntryItem : Entry -> Html Msg
-viewEntryItem entry =
-        li [ classList [ ( "marked", entry.marked ) ], onClick (Mark entry.id) ]
-           [ span [ class "phrase" ] [text entry.phrase]
-           , span [ class "points" ] [text (toString entry.points) ]]
+--viewEntryItem : Entry.Entry -> Html Msg
+--viewEntryItem entry =
+--        li [ classList [ ( "marked", entry.marked ) ], onClick (Mark entry.id) ]
+--           [ span [ class "phrase" ] [text entry.phrase]
+--           , span [ class "points" ] [text (toString entry.points) ]]
 
 
 view : Model -> Html Msg 
@@ -241,25 +252,43 @@ view model =
         div [class "content"]
         [viewHeader "BUZZWORD BINGO",
          viewPlayer model.name model.gameNumber,
-         viewEntryList model.entries,
+         viewNameInput model,
+         Entry.viewEntryList Mark model.entries,
          viewScore (sumMarkedPoints model.entries), 
-         viewAlertMessage model.alertMessage, 
+         alert CloseAlert model.alertMessage, 
          div [ class "button-group" ] 
-             [ button [ onClick NewGame ] [text "New Game"]
-             , button [ onClick ShareScore ] [text "Share Score"] ],
+             [ primaryButton NewGame "New Game"
+             , button [onClick ShareScore, disabled (hasZeroScore model), class "primary"] [text "Share Score"]],
          div [class "debug"] [ text (toString model) ],
          viewFooter
          ]
 
-allEntriesMarked : List Entry -> Bool
+
+viewNameInput : Model -> Html Msg
+viewNameInput model = 
+        case model.gameState of
+                EnteringName -> 
+                        div [class "name-input"]
+                            [input [ type_ "text"
+                                   , placeholder "Who's playing?"
+                                   , autofocus True 
+                                   , onInput SetNameInput
+                                   , value model.nameInput] []
+                            , primaryButton SaveNameInput "Save"
+                            , primaryButton CancelName "Cancel" 
+                            ]
+
+                Playing ->
+                         text ""
+
+allEntriesMarked : List Entry.Entry -> Bool
 allEntriesMarked entries =
        List.all .marked entries 
         
+emptyNameInput : Model -> Bool
+emptyNameInput model =
+        String.isEmpty model.nameInput
 
---main : Html Msg
---main = 
---    update NewGame initialModel
---    |> view 
 
 main : Program Never Model Msg
 main = 
